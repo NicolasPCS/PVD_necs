@@ -577,7 +577,7 @@ def main(opt):
 def parse_args():
 
     parser = argparse.ArgumentParser()
-    parser.add_argument('--dataroot_pc', default='ShapeNetCore.v2.PC15k/')
+    parser.add_argument('--dataroot_pc', default='ShapeNetCore.v4.PC15k/')
     parser.add_argument('--dataroot_sv', default='GenReData/')
     parser.add_argument('--category', default='chair')
 

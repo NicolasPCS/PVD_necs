@@ -82,7 +82,12 @@ class Uniform15KPC(Dataset):
                 except:
                     continue
 
-                assert point_cloud.shape[0] == 15000
+                # Added by Nicolás
+                #print(point_cloud.shape[0])
+
+                pc_shape = point_cloud.shape[0]
+
+                assert point_cloud.shape[0] == pc_shape #15000
                 self.all_points.append(point_cloud[np.newaxis, ...])
                 self.cate_idx_lst.append(cate_idx)
                 self.all_cate_mids.append((subd, mid))
@@ -124,11 +129,24 @@ class Uniform15KPC(Dataset):
         self.all_points = (self.all_points - self.all_points_mean) / self.all_points_std
         if self.box_per_shape:
             self.all_points = self.all_points - 0.5
-        self.train_points = self.all_points[:, :10000]
+
+        n_total = self.all_points.shape[1]
+
+        n_train = int(n_total * 0.7)
+        n_test = n_total - n_train
+        
+        """ self.train_points = self.all_points[:, :10000]
         self.test_points = self.all_points[:, 10000:]
 
         self.tr_sample_size = min(10000, tr_sample_size)
-        self.te_sample_size = min(5000, te_sample_size)
+        self.te_sample_size = min(5000, te_sample_size) """
+
+        self.train_points = self.all_points[:, :n_train]
+        self.test_points = self.all_points[:, n_train:]
+
+        self.tr_sample_size = min(n_train, tr_sample_size)
+        self.te_sample_size = min(n_test, te_sample_size)
+
         print("Total number of data:%d" % len(self.train_points))
         print("Min number of points: (train)%d (test)%d"
               % (self.tr_sample_size, self.te_sample_size))
@@ -148,13 +166,15 @@ class Uniform15KPC(Dataset):
         self.all_points_mean = mean
         self.all_points_std = std
         self.all_points = (self.all_points - self.all_points_mean) / self.all_points_std
-        self.train_points = self.all_points[:, :10000]
-        self.test_points = self.all_points[:, 10000:]
+        self.train_points = self.all_points[:, :10000] # 10000
+        self.test_points = self.all_points[:, 10000:] # 10000
 
     def __len__(self):
         return len(self.train_points)
 
     def __getitem__(self, idx):
+        #print(self.train_points.shape, self.test_points.shape)
+        # Training
         tr_out = self.train_points[idx]
         if self.random_subsample:
             tr_idxs = np.random.choice(tr_out.shape[0], self.tr_sample_size)
@@ -162,6 +182,7 @@ class Uniform15KPC(Dataset):
             tr_idxs = np.arange(self.tr_sample_size)
         tr_out = torch.from_numpy(tr_out[tr_idxs, :]).float()
 
+        # Test
         te_out = self.test_points[idx]
         if self.random_subsample:
             te_idxs = np.random.choice(te_out.shape[0], self.te_sample_size)
@@ -199,8 +220,8 @@ class Uniform15KPC(Dataset):
 
 
 class ShapeNet15kPointClouds(Uniform15KPC):
-    def __init__(self, root_dir="data/ShapeNetCore.v2.PC15k",
-                 categories=['airplane'], tr_sample_size=10000, te_sample_size=2048,
+    def __init__(self, root_dir="data/ShapeNetCore.v4.PC15k",
+                 categories=['airplane'], tr_sample_size=2048, te_sample_size=512, # tr_sample_size=10000, te_sample_size=2048,
                  split='train', scale=1., normalize_per_shape=False,
                  normalize_std_per_axis=False, box_per_shape=False,
                  random_subsample=False,
