@@ -5,6 +5,7 @@ from metrics.evaluation_metrics import compute_all_metrics, EMD_CD
 
 import torch.nn as nn
 import torch.utils.data
+import open3d as o3d
 
 import argparse
 from torch.distributions import Normal
@@ -400,12 +401,29 @@ def get_dataset(dataroot, npoints,category,use_mask=False):
     )
     return tr_dataset, te_dataset
 
+def normalization_bb(pcs):
+    # pcs: [B, N, 3]
+    bbox_min = pcs.min(dim=1, keepdim=True)[0]
+    bbox_max = pcs.max(dim=1, keepdim=True)[0]
+    bbox_center = (bbox_max + bbox_min) / 2
+    bbox_scale = (bbox_max - bbox_min).max(dim=2, keepdim=True)[0] / 2
+    pcs_normalized = (pcs - bbox_center) / bbox_scale
+    return pcs_normalized
 
+def farthest_point_sampling(points, n_samples):
+    # Create a point cloud of Open3D
+    pcd = o3d.geometry.PointCloud()
+    pcd.points = o3d.utility.Vector3dVector(points)
+
+    # compute FPS
+    downpcd_farthest = pcd.farthest_point_down_sample(n_samples)
+
+    return np.asarray(downpcd_farthest.points)
 
 def evaluate_gen(opt, ref_pcs, logger):
     print("From evaluation")
     if ref_pcs is None:
-        _, test_dataset = get_dataset(opt.dataroot, opt.npoints, opt.category, use_mask=False)
+        _, test_dataset = get_dataset(opt.dataroot_eval, opt.npoints, opt.category, use_mask=False)
         test_dataloader = torch.utils.data.DataLoader(test_dataset, batch_size=opt.batch_size,
                                                       shuffle=False, num_workers=int(opt.workers), drop_last=False)
         ref = []
@@ -420,10 +438,9 @@ def evaluate_gen(opt, ref_pcs, logger):
     logger.info("Loading sample path: %s"
       % (opt.eval_path))
     sample_pcs = torch.load(opt.eval_path).contiguous()
-
+    
     logger.info("Generation sample size:%s reference size: %s"
           % (sample_pcs.size(), ref_pcs.size()))
-
 
     # Compute metrics
     results = compute_all_metrics(sample_pcs, ref_pcs, opt.batch_size)
@@ -431,17 +448,15 @@ def evaluate_gen(opt, ref_pcs, logger):
                    if not isinstance(v, float) else v) for k, v in results.items()}
 
     pprint(results)
-    logger.info(results)
+    #logger.info(results)
 
     jsd = JSD(sample_pcs.numpy(), ref_pcs.numpy())
     pprint('JSD: {}'.format(jsd))
     logger.info('JSD: {}'.format(jsd))
 
-
-
 def generate(model, opt):
 
-    _, test_dataset = get_dataset(opt.dataroot, opt.npoints, opt.category)
+    _, test_dataset = get_dataset(opt.dataroot_gen, opt.npoints, opt.category)
 
     test_dataloader = torch.utils.data.DataLoader(test_dataset, batch_size=opt.batch_size,
                                                   shuffle=False, num_workers=int(opt.workers), drop_last=False)
@@ -456,31 +471,69 @@ def generate(model, opt):
             x = data['test_points'].transpose(1,2)
             m, s = data['mean'].float(), data['std'].float()
 
-            gen = model.gen_samples(x.shape,
-                                       'cuda', clip_denoised=False).detach().cpu()
+            gen = model.gen_samples(x.shape, 'cuda', clip_denoised=False).detach().cpu()
+            gen = gen.transpose(1,2).contiguous() # [B, N, 3]
+            x = x.transpose(1,2).contiguous() # [B, N, 3]
 
-            gen = gen.transpose(1,2).contiguous()
-            x = x.transpose(1,2).contiguous()
+            # Mean and std for complete objects
+            complete_objects_mean = torch.tensor([0.0004, 0.0061, 0.0488], device=gen.device).view(1, 1, 3) # [1, 1, 3]
+            complete_objects_std = torch.tensor([0.1201], device=gen.device).view(1, 1, 1) # [1, 1, 1]
 
+            for b in range(gen.shape[0]):
+                gen_b = gen[b].unsqueeze(0) # [1, N, 3]
+                x_b = x[b].unsqueeze(0) # [1, N, 3]
 
+                #if gen_b.shape[1] < 2048:
+                    #print(f"[DEBUG] Number of points of generated points is less than 2048 points: {gen_b.shape[1]}")
 
-            gen = gen * s + m
-            x = x * s + m
-            samples.append(gen)
-            ref.append(x)
+                # Move cloud to x > 0, and mirror it
+                ## Generated
+                shift = abs(torch.min(gen_b[:, :, 0])) - 0.01 # After visualize generated half point clouds, this is the best value
+                gen_b[:, :, 0] += shift
+                gen_mirrored = gen_b.clone()
+                gen_mirrored[:, :, 0] *= -1
+            
+                # TODO: compute the best shift value for the generated point cloud
 
-            visualize_pointcloud_batch(os.path.join(str(Path(opt.eval_path).parent), 'x.png'), gen[:64], None,
-                                       None, None)
+                ## Reference
+                shift = abs(torch.min(x_b[:, :, 0]))
+                x_b[:, :, 0] += shift
+                x_mirrored = x_b.clone()
+                x_mirrored[:, :, 0] *= -1
+
+                # Concatenate original and mirrored clouds
+                gen_full_pc = torch.cat((gen_b, gen_mirrored), dim=1)
+                x_full_pc = torch.cat((x_b, x_mirrored), dim=1)
+
+                #print(f"Size of cloud after mirroring: {gen_full_pc.shape}, {x_full_pc.shape}")
+
+                # Sample the point cloud to 2048 points
+                gen_np = gen_full_pc.squeeze(0).numpy() # (1, 4096, 3) → (4096, 3)
+                gen_sampled = farthest_point_sampling(gen_np, opt.npoints)
+                gen_b = torch.tensor(gen_sampled, dtype=torch.float32, device=gen.device).unsqueeze(0)
+
+                x_np = x_full_pc.squeeze(0).numpy()
+                x_sampled = farthest_point_sampling(x_np, opt.npoints)
+                x_b = torch.tensor(x_sampled, dtype=torch.float32, device=x.device).unsqueeze(0)
+
+                #print(f"Size of cloud after sampling: {gen.shape}, {x.shape}")
+
+                # Desnormalization
+                gen_b = gen_b * complete_objects_std + complete_objects_mean
+                x_b = x_b * complete_objects_std + complete_objects_mean
+                samples.append(gen_b)
+                ref.append(x_b)
+
+                visualize_pointcloud_batch(os.path.join(str(Path(opt.eval_path).parent), f'x_{i}.png'),
+                                           gen_b[:64], None, None, None)
 
         samples = torch.cat(samples, dim=0)
         ref = torch.cat(ref, dim=0)
 
         torch.save(samples, opt.eval_path)
-
-
+        torch.save(ref, opt.ref_path)
 
     return ref
-
 
 def main(opt):
 
@@ -522,19 +575,24 @@ def main(opt):
         ref = None
         if opt.generate:
             opt.eval_path = os.path.join(outf_syn, 'samples.pth')
+            # Added by Nicolás
+            opt.ref_path = os.path.join(outf_syn, 'reference.pth')
             Path(opt.eval_path).parent.mkdir(parents=True, exist_ok=True)
             ref=generate(model, opt)
             
         if opt.eval_gen:
             # Evaluate generation
-            evaluate_gen(opt, ref, logger)
+            #ref_data = torch.load(opt.reference_path).contiguous()
+            #print(ref_data.shape)
 
+            evaluate_gen(opt, ref, logger)
 
 def parse_args():
 
     parser = argparse.ArgumentParser()
-    parser.add_argument('--dataroot', default='ShapeNetCore.v4.PC15k/')
-    parser.add_argument('--category', default='chair')
+    parser.add_argument('--dataroot_gen', default='/home/ncaytuir/data-local/PVD_necs/ShapeNetCore.v4.PC15k')
+    parser.add_argument('--dataroot_eval', default='/home/ncaytuir/data-local/PVD_necs/ShapeNetCore.v2.PC15k')
+    parser.add_argument('--category', default='airplane')
 
     parser.add_argument('--batch_size', type=int, default=50, help='input batch size')
     parser.add_argument('--workers', type=int, default=16, help='workers')
@@ -560,15 +618,13 @@ def parse_args():
     parser.add_argument('--model_var_type', default='fixedsmall')
 
 
-    parser.add_argument('--model', default='',required=True, help="path to model (to continue training)")
+    parser.add_argument('--model', default='',required=False, help="path to model (to continue training)")
 
     '''eval'''
 
-    parser.add_argument('--eval_path',
-                        default='')
-
+    parser.add_argument('--eval_path', default='')
+    parser.add_argument('--reference_path', default='/home/ncaytuir/data-local/PVD_necs/val_data/ref_val_airplane.pt')
     parser.add_argument('--manualSeed', default=42, type=int, help='random seed')
-
     parser.add_argument('--gpu', type=int, default=0, metavar='S', help='gpu id (default: 0)')
 
     opt = parser.parse_args()
@@ -581,10 +637,256 @@ def parse_args():
     return opt
 if __name__ == '__main__':
     opt = parse_args()
-    opt.category = 'airplane'
-    opt.npoints = 2048
+    opt.category = 'car'
+    opt.batch_size = 1
     opt.generate = True
     opt.eval_gen = True
+    opt.model = '/home/ncaytuir/data-local/PVD_necs/output/train_generation/2025-06-26-11-57-40/epoch_9999.pth'
+    #opt.eval_path = '/home/ncaytuir/data-local/PVD_necs/output/test_generation_new2/2025-06-21-18-08-14/syn/samples.pth'
+    #opt.reference_path = '/home/ncaytuir/data-local/PVD_necs/output/test_generation_new2/2025-06-21-18-08-14/syn/reference.pth'
     set_seed(opt)
 
     main(opt)
+
+# python test_generation_new.py --model /home/ncaytuir/data-local/PVD_necs/output/train_generation/ckpt_original_airplane_2899.pth --eval_path /home/ncaytuir/data-local/PVD_necs/output/train_generation/ivan_samples_airplane.pt
+
+""" Sobre Airplane
+########################################################### Época 6299
+Sobre BS: 50
+{'1-NN-CD-acc': 0.8148148059844971,
+ '1-NN-CD-acc_f': 0.760493814945221,
+ '1-NN-CD-acc_t': 0.8691357970237732,
+ '1-NN-EMD-acc': 0.7246913313865662,
+ '1-NN-EMD-acc_f': 0.6419752836227417,
+ '1-NN-EMD-acc_t': 0.8074073791503906,
+ 'lgan_cov-CD': 0.40740740299224854,
+ 'lgan_cov-EMD': 0.43703705072402954,
+ 'lgan_mmd-CD': 0.00014712181291542947,
+ 'lgan_mmd-EMD': 0.0024036902468651533,
+ 'lgan_mmd_smp-CD': 0.0008123729494400322,
+ 'lgan_mmd_smp-EMD': 0.007992937229573727}
+'JSD: 0.07851427701891467'
+2025-06-23 20:16:22,473 : JSD: 0.07851427701891467
+
+Sobre BS: 25
+{'1-NN-CD-acc': 0.8246913552284241,
+ '1-NN-CD-acc_f': 0.7753086686134338,
+ '1-NN-CD-acc_t': 0.8740741014480591,
+ '1-NN-EMD-acc': 0.7271605134010315,
+ '1-NN-EMD-acc_f': 0.6567901372909546,
+ '1-NN-EMD-acc_t': 0.7975308895111084,
+ 'lgan_cov-CD': 0.39753085374832153,
+ 'lgan_cov-EMD': 0.45679011940956116,
+ 'lgan_mmd-CD': 0.00015008726040832698,
+ 'lgan_mmd-EMD': 0.002446971368044615,
+ 'lgan_mmd_smp-CD': 0.0008522255229763687,
+ 'lgan_mmd_smp-EMD': 0.008158557116985321}
+'JSD: 0.08357145338451133'
+2025-06-23 22:26:38,295 : JSD: 0.08357145338451133
+
+Sobre BS: 5
+{'1-NN-CD-acc': 0.7925925850868225,
+ '1-NN-CD-acc_f': 0.7382715940475464,
+ '1-NN-CD-acc_t': 0.8469135761260986,
+ '1-NN-EMD-acc': 0.6913580298423767,
+ '1-NN-EMD-acc_f': 0.604938268661499,
+ '1-NN-EMD-acc_t': 0.7777777910232544,
+ 'lgan_cov-CD': 0.385185182094574,
+ 'lgan_cov-EMD': 0.43703705072402954,
+ 'lgan_mmd-CD': 0.00014784822997171432,
+ 'lgan_mmd-EMD': 0.0024154982529580593,
+ 'lgan_mmd_smp-CD': 0.0009241084917448461,
+ 'lgan_mmd_smp-EMD': 0.008655093610286713}
+'JSD: 0.09329486063284698'
+2025-06-24 03:59:31,735 : JSD: 0.09329486063284698
+
+########################################################### Época 7299
+Sobre BS: 5
+{'1-NN-CD-acc': 0.7962962985038757,
+ '1-NN-CD-acc_f': 0.7333333492279053,
+ '1-NN-CD-acc_t': 0.8592592477798462,
+ '1-NN-EMD-acc': 0.6864197254180908,
+ '1-NN-EMD-acc_f': 0.604938268661499,
+ '1-NN-EMD-acc_t': 0.7679012417793274,
+ 'lgan_cov-CD': 0.39753085374832153,
+ 'lgan_cov-EMD': 0.4296296238899231,
+ 'lgan_mmd-CD': 0.00014797429321333766,
+ 'lgan_mmd-EMD': 0.0024017307441681623,
+ 'lgan_mmd_smp-CD': 0.0009225542307831347,
+ 'lgan_mmd_smp-EMD': 0.00868205539882183}
+'JSD: 0.09325957376219307'
+2025-06-24 14:58:08,144 : JSD: 0.09325957376219307
+
+########################################################### Época 7599
+Sobre BS: 5
+{'1-NN-CD-acc': 0.790123462677002,
+ '1-NN-CD-acc_f': 0.7308642268180847,
+ '1-NN-CD-acc_t': 0.8493826985359192,
+ '1-NN-EMD-acc': 0.7037037014961243,
+ '1-NN-EMD-acc_f': 0.6222222447395325,
+ '1-NN-EMD-acc_t': 0.7851851582527161,
+ 'lgan_cov-CD': 0.39753085374832153,
+ 'lgan_cov-EMD': 0.44197529554367065,
+ 'lgan_mmd-CD': 0.00014834936882834882,
+ 'lgan_mmd-EMD': 0.002430385909974575,
+ 'lgan_mmd_smp-CD': 0.0009238245547749102,
+ 'lgan_mmd_smp-EMD': 0.00867027323693037}
+'JSD: 0.09325667947637051'
+2025-06-24 19:59:32,803 : JSD: 0.09325667947637051
+
+########################################################### Época 8099
+Sobre BS: 1
+{'1-NN-CD-acc': 0.7925925850868225,
+ '1-NN-CD-acc_f': 0.7308642268180847,
+ '1-NN-CD-acc_t': 0.8543210029602051,
+ '1-NN-EMD-acc': 0.7469135522842407,
+ '1-NN-EMD-acc_f': 0.6814814805984497,
+ '1-NN-EMD-acc_t': 0.8123456835746765,
+ 'lgan_cov-CD': 0.3802469074726105,
+ 'lgan_cov-EMD': 0.40740740299224854,
+ 'lgan_mmd-CD': 0.0001441705389879644,
+ 'lgan_mmd-EMD': 0.002536298707127571,
+ 'lgan_mmd_smp-CD': 0.0009597541647963226,
+ 'lgan_mmd_smp-EMD': 0.00935051217675209}
+'JSD: 0.09809526014169379'
+2025-06-25 17:14:46,045 : JSD: 0.09809526014169379
+
+########################################################### Época 8999
+Sobre BS: 5
+{'1-NN-CD-acc': 0.790123462677002,
+ '1-NN-CD-acc_f': 0.7259259223937988,
+ '1-NN-CD-acc_t': 0.8543210029602051,
+ '1-NN-EMD-acc': 0.7037037014961243,
+ '1-NN-EMD-acc_f': 0.614814817905426,
+ '1-NN-EMD-acc_t': 0.7925925850868225,
+ 'lgan_cov-CD': 0.395061731338501,
+ 'lgan_cov-EMD': 0.43703705072402954,
+ 'lgan_mmd-CD': 0.00014821728109382093,
+ 'lgan_mmd-EMD': 0.002430854132398963,
+ 'lgan_mmd_smp-CD': 0.0009221052168868482,
+ 'lgan_mmd_smp-EMD': 0.008682173676788807}
+'JSD: 0.09330427927770302'
+2025-06-25 21:49:11,788 : JSD: 0.09330427927770302
+
+########################################################### Época 9199
+Sobre BS: 5
+{'1-NN-CD-acc': 0.7938271760940552,
+ '1-NN-CD-acc_f': 0.7333333492279053,
+ '1-NN-CD-acc_t': 0.8543210029602051,
+ '1-NN-EMD-acc': 0.7135802507400513,
+ '1-NN-EMD-acc_f': 0.63456791639328,
+ '1-NN-EMD-acc_t': 0.7925925850868225,
+ 'lgan_cov-CD': 0.3876543343067169,
+ 'lgan_cov-EMD': 0.4197530746459961,
+ 'lgan_mmd-CD': 0.00014823180390521884,
+ 'lgan_mmd-EMD': 0.0024388106539845467,
+ 'lgan_mmd_smp-CD': 0.0009230137802660465,
+ 'lgan_mmd_smp-EMD': 0.008669011294841766}
+'JSD: 0.09349423986455996'
+2025-06-26 02:44:31,571 : JSD: 0.09349423986455996
+
+########################################################### Época 9999
+Sobre BS: 50
+{'1-NN-CD-acc': 0.8111110925674438,
+ '1-NN-CD-acc_f': 0.7530864477157593,
+ '1-NN-CD-acc_t': 0.8691357970237732,
+ '1-NN-EMD-acc': 0.7246913313865662,
+ '1-NN-EMD-acc_f': 0.6271604895591736,
+ '1-NN-EMD-acc_t': 0.8222222328186035,
+ 'lgan_cov-CD': 0.4197530746459961,
+ 'lgan_cov-EMD': 0.4543209969997406,
+ 'lgan_mmd-CD': 0.00014735347940586507,
+ 'lgan_mmd-EMD': 0.002435477217659354,
+ 'lgan_mmd_smp-CD': 0.0008127850014716387,
+ 'lgan_mmd_smp-EMD': 0.007994692772626877}
+'JSD: 0.07845447575639675'
+2025-06-26 13:13:59,796 : JSD: 0.07845447575639675
+
+########################################################### Época 9999
+Sobre BS: 1
+{'1-NN-CD-acc': 0.7987654209136963,
+ '1-NN-CD-acc_f': 0.7432098984718323,
+ '1-NN-CD-acc_t': 0.8543210029602051,
+ '1-NN-EMD-acc': 0.749382734298706,
+ '1-NN-EMD-acc_f': 0.6716049313545227,
+ '1-NN-EMD-acc_t': 0.8271604776382446,
+ 'lgan_cov-CD': 0.3827160596847534,
+ 'lgan_cov-EMD': 0.4098765552043915,
+ 'lgan_mmd-CD': 0.00014343159273266792,
+ 'lgan_mmd-EMD': 0.0025120240170508623,
+ 'lgan_mmd_smp-CD': 0.0009591410052962601,
+ 'lgan_mmd_smp-EMD': 0.00933067686855793}
+'JSD: 0.09804481881685412'
+"""
+
+""" Sobre Car
+########################################################### Época 4699
+Sobre BS: 5
+{'1-NN-CD-acc': 0.6946022510528564,
+ '1-NN-CD-acc_f': 0.6619318127632141,
+ '1-NN-CD-acc_t': 0.7272727489471436,
+ '1-NN-EMD-acc': 0.6065340638160706,
+ '1-NN-EMD-acc_f': 0.5965909361839294,
+ '1-NN-EMD-acc_t': 0.6164772510528564,
+ 'lgan_cov-CD': 0.3948863744735718,
+ 'lgan_cov-EMD': 0.47727271914482117,
+ 'lgan_mmd-CD': 0.00045288942055776715,
+ 'lgan_mmd-EMD': 0.0031069687101989985,
+ 'lgan_mmd_smp-CD': 0.00047983683180063963,
+ 'lgan_mmd_smp-EMD': 0.0037946889642626047}
+'JSD: 0.02396557926628695'
+2025-06-28 05:31:41,038 : JSD: 0.02396557926628695
+
+########################################################### Época 9099
+Sobre BS: 5
+{'1-NN-CD-acc': 0.6917613744735718,
+ '1-NN-CD-acc_f': 0.6534090638160706,
+ '1-NN-CD-acc_t': 0.7301136255264282,
+ '1-NN-EMD-acc': 0.6207386255264282,
+ '1-NN-EMD-acc_f': 0.5852272510528564,
+ '1-NN-EMD-acc_t': 0.65625,
+ 'lgan_cov-CD': 0.3920454680919647,
+ 'lgan_cov-EMD': 0.4886363744735718,
+ 'lgan_mmd-CD': 0.0004531594750005752,
+ 'lgan_mmd-EMD': 0.0031292615458369255,
+ 'lgan_mmd_smp-CD': 0.0004794332489836961,
+ 'lgan_mmd_smp-EMD': 0.003789168084040284}
+'JSD: 0.024957084322826617'
+2025-06-29 16:29:21,069 : JSD: 0.024957084322826617
+"""
+
+""" Sobre Chair
+########################################################### Época 2099
+Sobre BS: 5
+{'1-NN-CD-acc': 0.6105991005897522,
+ '1-NN-CD-acc_f': 0.7081413269042969,
+ '1-NN-CD-acc_t': 0.5130568146705627,
+ '1-NN-EMD-acc': 0.560675859451294,
+ '1-NN-EMD-acc_f': 0.5775729417800903,
+ '1-NN-EMD-acc_t': 0.5437787771224976,
+ 'lgan_cov-CD': 0.4669739007949829,
+ 'lgan_cov-EMD': 0.48847925662994385,
+ 'lgan_mmd-CD': 0.0013540295185521245,
+ 'lgan_mmd-EMD': 0.0077457367442548275,
+ 'lgan_mmd_smp-CD': 0.0012510507367551327,
+ 'lgan_mmd_smp-EMD': 0.007952139712870121}
+'JSD: 0.015472017760501444'
+2025-06-28 11:45:33,880 : JSD: 0.015472017760501444
+
+########################################################### Época 2799
+Sobre BS: 5
+{'1-NN-CD-acc': 0.6090629696846008,
+ '1-NN-CD-acc_f': 0.7173579335212708,
+ '1-NN-CD-acc_t': 0.5007680654525757,
+ '1-NN-EMD-acc': 0.5791090726852417,
+ '1-NN-EMD-acc_f': 0.605222761631012,
+ '1-NN-EMD-acc_t': 0.5529953837394714,
+ 'lgan_cov-CD': 0.4669739007949829,
+ 'lgan_cov-EMD': 0.5115207433700562,
+ 'lgan_mmd-CD': 0.0013554842444136739,
+ 'lgan_mmd-EMD': 0.007822899147868156,
+ 'lgan_mmd_smp-CD': 0.0012275221524760127,
+ 'lgan_mmd_smp-EMD': 0.0078544020652771}
+'JSD: 0.013550311542276816'
+2025-06-29 04:05:29,043 : JSD: 0.013550311542276816
+"""

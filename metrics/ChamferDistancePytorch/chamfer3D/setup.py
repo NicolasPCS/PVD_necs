@@ -10,7 +10,7 @@ setup(
         ]),
     ],
 
-    extra_cuda_cflags=['--compiler-bindir=/usr/bin/g++-7'],
+    #extra_cuda_cflags=['--compiler-bindir=/usr/bin/g++-7'],
     cmdclass={
         'build_ext': BuildExtension
     })

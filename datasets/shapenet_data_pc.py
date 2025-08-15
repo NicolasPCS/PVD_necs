@@ -131,7 +131,6 @@ class Uniform15KPC(Dataset):
             self.all_points = self.all_points - 0.5
 
         n_total = self.all_points.shape[1]
-
         n_train = int(n_total * 0.7)
         n_test = n_total - n_train
         

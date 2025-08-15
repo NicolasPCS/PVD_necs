@@ -9,3 +9,5 @@ __pycache__
 eval_model
 eval_data
 ShapeNetCore.v4.PC15k/
+MyScripts/
+checkpoints/

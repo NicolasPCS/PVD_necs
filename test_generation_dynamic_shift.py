@@ -5,6 +5,7 @@ from metrics.evaluation_metrics import compute_all_metrics, EMD_CD
 
 import torch.nn as nn
 import torch.utils.data
+import open3d as o3d
 
 import argparse
 from torch.distributions import Normal
@@ -400,12 +401,29 @@ def get_dataset(dataroot, npoints,category,use_mask=False):
     )
     return tr_dataset, te_dataset
 
+def normalization_bb(pcs):
+    # pcs: [B, N, 3]
+    bbox_min = pcs.min(dim=1, keepdim=True)[0]
+    bbox_max = pcs.max(dim=1, keepdim=True)[0]
+    bbox_center = (bbox_max + bbox_min) / 2
+    bbox_scale = (bbox_max - bbox_min).max(dim=2, keepdim=True)[0] / 2
+    pcs_normalized = (pcs - bbox_center) / bbox_scale
+    return pcs_normalized
 
+def farthest_point_sampling(points, n_samples):
+    # Create a point cloud of Open3D
+    pcd = o3d.geometry.PointCloud()
+    pcd.points = o3d.utility.Vector3dVector(points)
+
+    # compute FPS
+    downpcd_farthest = pcd.farthest_point_down_sample(n_samples)
+
+    return np.asarray(downpcd_farthest.points)
 
 def evaluate_gen(opt, ref_pcs, logger):
     print("From evaluation")
     if ref_pcs is None:
-        _, test_dataset = get_dataset(opt.dataroot, opt.npoints, opt.category, use_mask=False)
+        _, test_dataset = get_dataset(opt.dataroot_eval, opt.npoints, opt.category, use_mask=False)
         test_dataloader = torch.utils.data.DataLoader(test_dataset, batch_size=opt.batch_size,
                                                       shuffle=False, num_workers=int(opt.workers), drop_last=False)
         ref = []
@@ -420,10 +438,9 @@ def evaluate_gen(opt, ref_pcs, logger):
     logger.info("Loading sample path: %s"
       % (opt.eval_path))
     sample_pcs = torch.load(opt.eval_path).contiguous()
-
+    
     logger.info("Generation sample size:%s reference size: %s"
           % (sample_pcs.size(), ref_pcs.size()))
-
 
     # Compute metrics
     results = compute_all_metrics(sample_pcs, ref_pcs, opt.batch_size)
@@ -431,17 +448,43 @@ def evaluate_gen(opt, ref_pcs, logger):
                    if not isinstance(v, float) else v) for k, v in results.items()}
 
     pprint(results)
-    logger.info(results)
+    #logger.info(results)
 
     jsd = JSD(sample_pcs.numpy(), ref_pcs.numpy())
     pprint('JSD: {}'.format(jsd))
     logger.info('JSD: {}'.format(jsd))
 
+# -------- Helpers
+def dynamic_shift(pc, k=32):
+    """
+    pc: [1, N, 3]
+    Returns the best shift value
+    """
+    x = pc[0, :, 0] # [N]}
+    # Fewest k = topk over -x
+    k = min(k, x.shape[0])
+    #print(f"Dynamic shift: k={k}")
+    vals, _ = torch.topk(-x, k=k, largest=False)
+    #print(f"Dynamic shift: vals={vals}")
+    mean_k_smallest = vals.mean()
+    #print(f"Dynamic shift: mean_k_smallest={mean_k_smallest}")
+    #print(f"Dynamic shift: {mean_k_smallest / 100}")
+    return mean_k_smallest / 100
 
+def stitch_on_x0(pc):
+    """
+    half_pc: [1, N, 3]
+    Return the stitched points: mean of (p, mirror(p)) with x=0
+    """
+    # Computes the average between the two points, it is expected to
+    # obtain values closer to 0'
+    seam = 0.5 * pc
+    seam[:, :, 0] = 0.0 # Set x=0
+    return seam # [1, N, 3]
 
 def generate(model, opt):
 
-    _, test_dataset = get_dataset(opt.dataroot, opt.npoints, opt.category)
+    _, test_dataset = get_dataset(opt.dataroot_gen, opt.npoints, opt.category)
 
     test_dataloader = torch.utils.data.DataLoader(test_dataset, batch_size=opt.batch_size,
                                                   shuffle=False, num_workers=int(opt.workers), drop_last=False)
@@ -456,31 +499,72 @@ def generate(model, opt):
             x = data['test_points'].transpose(1,2)
             m, s = data['mean'].float(), data['std'].float()
 
-            gen = model.gen_samples(x.shape,
-                                       'cuda', clip_denoised=False).detach().cpu()
+            gen = model.gen_samples(x.shape, 'cuda', clip_denoised=False).detach().cpu()
+            gen = gen.transpose(1,2).contiguous() # [B, N, 3]
+            x = x.transpose(1,2).contiguous() # [B, N, 3]
 
-            gen = gen.transpose(1,2).contiguous()
-            x = x.transpose(1,2).contiguous()
+            # Mean and std for complete objects
+            complete_objects_mean = torch.tensor([0.0004, 0.0061, 0.0488], device=gen.device).view(1, 1, 3) # [1, 1, 3]
+            complete_objects_std = torch.tensor([0.1201], device=gen.device).view(1, 1, 1) # [1, 1, 1]
 
+            for b in range(gen.shape[0]):
+                gen_b = gen[b].unsqueeze(0) # [1, N, 3]
+                x_b = x[b].unsqueeze(0) # [1, N, 3]
 
+                #if gen_b.shape[1] < 2048:
+                    #print(f"[DEBUG] Number of points of generated points is less than 2048 points: {gen_b.shape[1]}")
 
-            gen = gen * s + m
-            x = x * s + m
-            samples.append(gen)
-            ref.append(x)
+                # Move cloud to x > 0, and mirror it
+                ## Generated
+                shift = abs(torch.min(gen_b[:, :, 0])) - dynamic_shift(gen_b, k=5)
+                gen_b[:, :, 0] += shift
 
-            visualize_pointcloud_batch(os.path.join(str(Path(opt.eval_path).parent), 'x.png'), gen[:64], None,
-                                       None, None)
+                # Mirror
+                gen_mirrored = gen_b.clone()
+                gen_mirrored[:, :, 0] *= -1
+
+                # Seam
+                gen_seam = stitch_on_x0(torch.cat((gen_b, gen_mirrored), dim=1))
+
+                ## Reference
+                shift = abs(torch.min(x_b[:, :, 0]))
+                x_b[:, :, 0] += shift
+                x_mirrored = x_b.clone()
+                x_mirrored[:, :, 0] *= -1
+
+                # Concatenate original and mirrored clouds
+                gen_full_pc = torch.cat((gen_b, gen_mirrored, gen_seam), dim=1)
+                x_full_pc = torch.cat((x_b, x_mirrored), dim=1)
+
+                #print(f"Size of cloud after mirroring: {gen_full_pc.shape}, {x_full_pc.shape}")
+
+                # Sample the point cloud to 2048 points
+                gen_np = gen_full_pc.squeeze(0).numpy() # (1, 4096, 3) → (4096, 3)
+                gen_sampled = farthest_point_sampling(gen_np, opt.npoints)
+                gen_b = torch.tensor(gen_sampled, dtype=torch.float32, device=gen.device).unsqueeze(0)
+
+                x_np = x_full_pc.squeeze(0).numpy()
+                x_sampled = farthest_point_sampling(x_np, opt.npoints)
+                x_b = torch.tensor(x_sampled, dtype=torch.float32, device=x.device).unsqueeze(0)
+
+                #print(f"Size of cloud after sampling: {gen.shape}, {x.shape}")
+
+                # Desnormalization
+                gen_b = gen_b * complete_objects_std + complete_objects_mean
+                x_b = x_b * complete_objects_std + complete_objects_mean
+                samples.append(gen_b)
+                ref.append(x_b)
+
+                visualize_pointcloud_batch(os.path.join(str(Path(opt.eval_path).parent), f'x_{i}.png'),
+                                           gen_b[:64], None, None, None)
 
         samples = torch.cat(samples, dim=0)
         ref = torch.cat(ref, dim=0)
 
         torch.save(samples, opt.eval_path)
-
-
+        torch.save(ref, opt.ref_path)
 
     return ref
-
 
 def main(opt):
 
@@ -522,19 +606,24 @@ def main(opt):
         ref = None
         if opt.generate:
             opt.eval_path = os.path.join(outf_syn, 'samples.pth')
+            # Added by Nicolás
+            opt.ref_path = os.path.join(outf_syn, 'reference.pth')
             Path(opt.eval_path).parent.mkdir(parents=True, exist_ok=True)
             ref=generate(model, opt)
             
         if opt.eval_gen:
             # Evaluate generation
-            evaluate_gen(opt, ref, logger)
+            #ref_data = torch.load(opt.reference_path).contiguous()
+            #print(ref_data.shape)
 
+            evaluate_gen(opt, ref, logger)
 
 def parse_args():
 
     parser = argparse.ArgumentParser()
-    parser.add_argument('--dataroot', default='ShapeNetCore.v4.PC15k/')
-    parser.add_argument('--category', default='chair')
+    parser.add_argument('--dataroot_gen', default='/home/ncaytuir/data-local/PVD_necs/ShapeNetCore.v4.PC15k')
+    parser.add_argument('--dataroot_eval', default='/home/ncaytuir/data-local/PVD_necs/ShapeNetCore.v2.PC15k')
+    parser.add_argument('--category', default='airplane')
 
     parser.add_argument('--batch_size', type=int, default=50, help='input batch size')
     parser.add_argument('--workers', type=int, default=16, help='workers')
@@ -560,15 +649,13 @@ def parse_args():
     parser.add_argument('--model_var_type', default='fixedsmall')
 
 
-    parser.add_argument('--model', default='',required=True, help="path to model (to continue training)")
+    parser.add_argument('--model', default='',required=False, help="path to model (to continue training)")
 
     '''eval'''
 
-    parser.add_argument('--eval_path',
-                        default='')
-
+    parser.add_argument('--eval_path', default='')
+    parser.add_argument('--reference_path', default='/home/ncaytuir/data-local/PVD_necs/val_data/ref_val_airplane.pt')
     parser.add_argument('--manualSeed', default=42, type=int, help='random seed')
-
     parser.add_argument('--gpu', type=int, default=0, metavar='S', help='gpu id (default: 0)')
 
     opt = parser.parse_args()
@@ -582,9 +669,20 @@ def parse_args():
 if __name__ == '__main__':
     opt = parse_args()
     opt.category = 'airplane'
-    opt.npoints = 2048
+    opt.batch_size = 5 #5
     opt.generate = True
     opt.eval_gen = True
+    opt.model = '/home/ncaytuir/data-local/PVD_necs/output/train_generation/2025-06-18-12-50-25/epoch_7599.pth'
+    #opt.eval_path = '/home/ncaytuir/data-local/PVD_necs/output/test_generation_new2/2025-06-21-18-08-14/syn/samples.pth'
+    #opt.reference_path = '/home/ncaytuir/data-local/PVD_necs/output/test_generation_new2/2025-06-21-18-08-14/syn/reference.pth'
     set_seed(opt)
 
     main(opt)
+
+# python test_generation_new.py --model /home/ncaytuir/data-local/PVD_necs/output/train_generation/ckpt_original_airplane_2899.pth --eval_path /home/ncaytuir/data-local/PVD_necs/output/train_generation/ivan_samples_airplane.pt
+
+""" Sobre Airplane
+########################################################### Época 7599
+Sobre BS: 5
+
+"""

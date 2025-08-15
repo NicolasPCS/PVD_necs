@@ -6,8 +6,8 @@ _src_path = os.path.dirname(os.path.abspath(__file__))
 _backend = load(name='_pvcnn_backend',
                 extra_cflags=['-O3', '-std=c++17'],
                 extra_cuda_cflags=[
-                    '--compiler-bindir=/usr/bin/gcc-7',
-                    #'-gencode=arch=compute_86,code=sm_86'
+                    #'--compiler-bindir=/usr/bin/gcc-7',
+                    '-gencode=arch=compute_86,code=sm_86'
                 ],
                 sources=[os.path.join(_src_path,'src', f) for f in [
                     'ball_query/ball_query.cpp',

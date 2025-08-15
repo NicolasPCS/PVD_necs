@@ -400,7 +400,14 @@ def get_dataset(dataroot, npoints,category,use_mask=False):
     )
     return tr_dataset, te_dataset
 
-
+def normalization_bb(pcs):
+    # pcs: [B, N, 3]
+    bbox_min = pcs.min(dim=1, keepdim=True)[0]
+    bbox_max = pcs.max(dim=1, keepdim=True)[0]
+    bbox_center = (bbox_max + bbox_min) / 2
+    bbox_scale = (bbox_max - bbox_min).max(dim=2, keepdim=True)[0] / 2
+    pcs_normalized = (pcs - bbox_center) / bbox_scale
+    return pcs_normalized
 
 def evaluate_gen(opt, ref_pcs, logger):
     print("From evaluation")
@@ -420,10 +427,24 @@ def evaluate_gen(opt, ref_pcs, logger):
     logger.info("Loading sample path: %s"
       % (opt.eval_path))
     sample_pcs = torch.load(opt.eval_path).contiguous()
+    #sample_pcs = sample_pcs['ref']
+    """ sample_data = torch.load(opt.eval_path)
+
+    if isinstance(sample_data, dict):
+        sample_pcs = sample_data['ref']
+        mean = sample_data['mean']
+        std = sample_data['std']
+        sample_pcs = sample_pcs * std + mean  # Desnormalización
+    else:
+        sample_pcs = sample_data  # Ya es un tensor desnormalizado """
 
     logger.info("Generation sample size:%s reference size: %s"
           % (sample_pcs.size(), ref_pcs.size()))
 
+    #sample_pcs = normalization_bb(sample_pcs.float())
+    #ref_pcs = normalization_bb(ref_pcs.float())
+
+    #logger.info("Normalizados")
 
     # Compute metrics
     results = compute_all_metrics(sample_pcs, ref_pcs, opt.batch_size)
@@ -431,7 +452,7 @@ def evaluate_gen(opt, ref_pcs, logger):
                    if not isinstance(v, float) else v) for k, v in results.items()}
 
     pprint(results)
-    logger.info(results)
+    #logger.info(results)
 
     jsd = JSD(sample_pcs.numpy(), ref_pcs.numpy())
     pprint('JSD: {}'.format(jsd))
@@ -520,21 +541,37 @@ def main(opt):
 
 
         ref = None
-        if opt.generate:
+        """ if opt.generate:
             opt.eval_path = os.path.join(outf_syn, 'samples.pth')
             Path(opt.eval_path).parent.mkdir(parents=True, exist_ok=True)
-            ref=generate(model, opt)
+            ref=generate(model, opt) """
             
         if opt.eval_gen:
             # Evaluate generation
-            evaluate_gen(opt, ref, logger)
+
+            ref_data = torch.load(opt.reference_path)
+
+            ref_pcs = ref_data['ref']
+            mean = ref_data['mean'].float()
+            std = ref_data['std'].float()
+
+            ref_pcs = ref_pcs * std + mean
+
+            #print("Media: ", mean)
+            #print("STD: ", std)
+
+            ref_pcs = ref_pcs.contiguous()
+
+            print(ref_pcs.shape)
+
+            evaluate_gen(opt, ref_pcs, logger)
 
 
 def parse_args():
 
     parser = argparse.ArgumentParser()
-    parser.add_argument('--dataroot', default='ShapeNetCore.v4.PC15k/')
-    parser.add_argument('--category', default='chair')
+    parser.add_argument('--dataroot', default='/home/ncaytuir/data-local/LION_necs/data/ShapeNetCore.v2.PC15k/')
+    parser.add_argument('--category', default='airplane')
 
     parser.add_argument('--batch_size', type=int, default=50, help='input batch size')
     parser.add_argument('--workers', type=int, default=16, help='workers')
@@ -564,11 +601,9 @@ def parse_args():
 
     '''eval'''
 
-    parser.add_argument('--eval_path',
-                        default='')
-
+    parser.add_argument('--eval_path', default='')
+    parser.add_argument('--reference_path', default='/home/ncaytuir/data-local/PVD_necs/val_data/ref_val_airplane.pt')
     parser.add_argument('--manualSeed', default=42, type=int, help='random seed')
-
     parser.add_argument('--gpu', type=int, default=0, metavar='S', help='gpu id (default: 0)')
 
     opt = parser.parse_args()
@@ -581,10 +616,11 @@ def parse_args():
     return opt
 if __name__ == '__main__':
     opt = parse_args()
-    opt.category = 'airplane'
-    opt.npoints = 2048
-    opt.generate = True
+    opt.generate = False
     opt.eval_gen = True
+    opt.reference_path = '/home/ncaytuir/data-local/PVD_necs/val_data/ref_val_airplane.pt'
     set_seed(opt)
 
     main(opt)
+
+# python test_generation_new.py --model /home/ncaytuir/data-local/PVD_necs/output/train_generation/ckpt_original_airplane_2899.pth --eval_path /home/ncaytuir/data-local/PVD_necs/output/train_generation/ivan_samples_airplane.pt
