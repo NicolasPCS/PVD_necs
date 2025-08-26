@@ -219,8 +219,8 @@ class Uniform15KPC(Dataset):
 
 
 class ShapeNet15kPointClouds(Uniform15KPC):
-    def __init__(self, root_dir="data/ShapeNetCore.v4.PC15k",
-                 categories=['airplane'], tr_sample_size=2048, te_sample_size=512, # tr_sample_size=10000, te_sample_size=2048,
+    def __init__(self, root_dir="data/ShapeNetCore.v5.PC15k",
+                 categories=['airplane'], tr_sample_size=5000, te_sample_size=2048, # tr_sample_size=10000, te_sample_size=2048,
                  split='train', scale=1., normalize_per_shape=False,
                  normalize_std_per_axis=False, box_per_shape=False,
                  random_subsample=False,

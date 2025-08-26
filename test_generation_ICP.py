@@ -657,7 +657,7 @@ def parse_args():
 if __name__ == '__main__':
     opt = parse_args()
     opt.category = 'airplane'
-    opt.batch_size = 5 #5
+    opt.batch_size = 1 #5
     opt.generate = True
     opt.eval_gen = True
     opt.model = '/home/ncaytuir/data-local/PVD_necs/output/train_generation/2025-06-18-12-50-25/epoch_7599.pth'
@@ -672,5 +672,20 @@ if __name__ == '__main__':
 """ Sobre Airplane
 ########################################################### Época 7599
 Sobre BS: 5
+{'1-NN-CD-acc': 0.8148148059844971,
+ '1-NN-CD-acc_f': 0.7456790208816528,
+ '1-NN-CD-acc_t': 0.8839505910873413,
+ '1-NN-EMD-acc': 0.750617265701294,
+ '1-NN-EMD-acc_f': 0.6419752836227417,
+ '1-NN-EMD-acc_t': 0.8592592477798462,
+ 'lgan_cov-CD': 0.3802469074726105,
+ 'lgan_cov-EMD': 0.42716050148010254,
+ 'lgan_mmd-CD': 0.0001593269844306633,
+ 'lgan_mmd-EMD': 0.002619354519993067,
+ 'lgan_mmd_smp-CD': 0.003547427011653781,
+ 'lgan_mmd_smp-EMD': 0.01565161533653736}
+'JSD: 0.1262633596132705'
+2025-08-15 21:40:48,536 : JSD: 0.1262633596132705
 
+Sobre BS: 1
 """

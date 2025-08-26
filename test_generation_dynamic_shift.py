@@ -455,7 +455,7 @@ def evaluate_gen(opt, ref_pcs, logger):
     logger.info('JSD: {}'.format(jsd))
 
 # -------- Helpers
-def dynamic_shift(pc, k=32):
+def dynamic_shift(pc, k):
     """
     pc: [1, N, 3]
     Returns the best shift value
@@ -464,23 +464,24 @@ def dynamic_shift(pc, k=32):
     # Fewest k = topk over -x
     k = min(k, x.shape[0])
     #print(f"Dynamic shift: k={k}")
-    vals, _ = torch.topk(-x, k=k, largest=False)
+    vals, _ = torch.topk(x, k=k, largest=False)
     #print(f"Dynamic shift: vals={vals}")
     mean_k_smallest = vals.mean()
     #print(f"Dynamic shift: mean_k_smallest={mean_k_smallest}")
     #print(f"Dynamic shift: {mean_k_smallest / 100}")
     return mean_k_smallest / 100
 
-def stitch_on_x0(pc):
+def stitch_on_x0(pc, alphas=(0.45, 0.5, 0.55)):
     """
     half_pc: [1, N, 3]
     Return the stitched points: mean of (p, mirror(p)) with x=0
     """
     # Computes the average between the two points, it is expected to
     # obtain values closer to 0'
-    seam = 0.5 * pc
-    seam[:, :, 0] = 0.0 # Set x=0
-    return seam # [1, N, 3]
+    mir = pc.clone()
+    mir[:, :, 0] *= -1
+    seam = [ (1-a)*pc + a*mir for a in alphas]
+    return torch.cat(seam, dim=1) # [1, len(alphas)*N, 3]
 
 def generate(model, opt):
 
@@ -491,6 +492,7 @@ def generate(model, opt):
 
     with torch.no_grad():
 
+        halfs = []
         samples = []
         ref = []
 
@@ -516,15 +518,20 @@ def generate(model, opt):
 
                 # Move cloud to x > 0, and mirror it
                 ## Generated
-                shift = abs(torch.min(gen_b[:, :, 0])) - dynamic_shift(gen_b, k=5)
+                d_shift = dynamic_shift(gen_b, k=32)
+                shift = abs(torch.min(gen_b[:, :, 0])) - d_shift
+                #print(shift)
                 gen_b[:, :, 0] += shift
+                #gen_b[:, :, 0] -= shift
 
                 # Mirror
                 gen_mirrored = gen_b.clone()
                 gen_mirrored[:, :, 0] *= -1
 
+                halfs.append(gen_b)
+
                 # Seam
-                gen_seam = stitch_on_x0(torch.cat((gen_b, gen_mirrored), dim=1))
+                #gen_seam = stitch_on_x0(gen_b, alphas=(0.45, 0.5, 0.55))
 
                 ## Reference
                 shift = abs(torch.min(x_b[:, :, 0]))
@@ -533,7 +540,7 @@ def generate(model, opt):
                 x_mirrored[:, :, 0] *= -1
 
                 # Concatenate original and mirrored clouds
-                gen_full_pc = torch.cat((gen_b, gen_mirrored, gen_seam), dim=1)
+                gen_full_pc = torch.cat((gen_b, gen_mirrored), dim=1)#, gen_seam), dim=1)
                 x_full_pc = torch.cat((x_b, x_mirrored), dim=1)
 
                 #print(f"Size of cloud after mirroring: {gen_full_pc.shape}, {x_full_pc.shape}")
@@ -558,9 +565,11 @@ def generate(model, opt):
                 visualize_pointcloud_batch(os.path.join(str(Path(opt.eval_path).parent), f'x_{i}.png'),
                                            gen_b[:64], None, None, None)
 
+        halfs = torch.cat(halfs, dim=0)
         samples = torch.cat(samples, dim=0)
         ref = torch.cat(ref, dim=0)
 
+        torch.save(halfs, opt.half_path)
         torch.save(samples, opt.eval_path)
         torch.save(ref, opt.ref_path)
 
@@ -608,6 +617,7 @@ def main(opt):
             opt.eval_path = os.path.join(outf_syn, 'samples.pth')
             # Added by Nicolás
             opt.ref_path = os.path.join(outf_syn, 'reference.pth')
+            opt.half_path = os.path.join(outf_syn, 'halfs.pth')
             Path(opt.eval_path).parent.mkdir(parents=True, exist_ok=True)
             ref=generate(model, opt)
             
@@ -621,7 +631,7 @@ def main(opt):
 def parse_args():
 
     parser = argparse.ArgumentParser()
-    parser.add_argument('--dataroot_gen', default='/home/ncaytuir/data-local/PVD_necs/ShapeNetCore.v4.PC15k')
+    parser.add_argument('--dataroot_gen', default='/home/ncaytuir/data-local/PVD_necs/ShapeNetCore.v5.PC15k')
     parser.add_argument('--dataroot_eval', default='/home/ncaytuir/data-local/PVD_necs/ShapeNetCore.v2.PC15k')
     parser.add_argument('--category', default='airplane')
 
@@ -669,10 +679,10 @@ def parse_args():
 if __name__ == '__main__':
     opt = parse_args()
     opt.category = 'airplane'
-    opt.batch_size = 5 #5
+    opt.batch_size = 50 #5
     opt.generate = True
     opt.eval_gen = True
-    opt.model = '/home/ncaytuir/data-local/PVD_necs/output/train_generation/2025-06-18-12-50-25/epoch_7599.pth'
+    opt.model = '/home/ncaytuir/data-local/PVD_necs/output/train_generation/2025-08-22-18-13-18/epoch_4599.pth'
     #opt.eval_path = '/home/ncaytuir/data-local/PVD_necs/output/test_generation_new2/2025-06-21-18-08-14/syn/samples.pth'
     #opt.reference_path = '/home/ncaytuir/data-local/PVD_necs/output/test_generation_new2/2025-06-21-18-08-14/syn/reference.pth'
     set_seed(opt)
@@ -684,5 +694,35 @@ if __name__ == '__main__':
 """ Sobre Airplane
 ########################################################### Época 7599
 Sobre BS: 5
+{'1-NN-CD-acc': 0.9567901492118835,
+ '1-NN-CD-acc_f': 0.9728395342826843,
+ '1-NN-CD-acc_t': 0.9407407641410828,
+ '1-NN-EMD-acc': 0.904938280582428,
+ '1-NN-EMD-acc_f': 0.8691357970237732,
+ '1-NN-EMD-acc_t': 0.9407407641410828,
+ 'lgan_cov-CD': 0.2987654209136963,
+ 'lgan_cov-EMD': 0.35555556416511536,
+ 'lgan_mmd-CD': 0.00020923551346641034,
+ 'lgan_mmd-EMD': 0.0034031374379992485,
+ 'lgan_mmd_smp-CD': 0.0008551519131287932,
+ 'lgan_mmd_smp-EMD': 0.00799560546875}
+'JSD: 0.0883490574591228'
+2025-08-18 18:05:51,387 : JSD: 0.0883490574591228
 
+########################################################### Época 2899 (nuevo)
+Sobre BS: 50
+{'1-NN-CD-acc': 0.8044554591178894,
+ '1-NN-CD-acc_f': 0.7252475023269653,
+ '1-NN-CD-acc_t': 0.8836633563041687,
+ '1-NN-EMD-acc': 0.7351484894752502,
+ '1-NN-EMD-acc_f': 0.646039605140686,
+ '1-NN-EMD-acc_t': 0.8242574334144592,
+ 'lgan_cov-CD': 0.46782177686691284,
+ 'lgan_cov-EMD': 0.4529702961444855,
+ 'lgan_mmd-CD': 0.00015751755563542247,
+ 'lgan_mmd-EMD': 0.0027367027942091227,
+ 'lgan_mmd_smp-CD': 0.0007843985804356635,
+ 'lgan_mmd_smp-EMD': 0.007534892298281193}
+'JSD: 0.0858766008307974'
+2025-08-24 12:36:21,468 : JSD: 0.0858766008307974
 """

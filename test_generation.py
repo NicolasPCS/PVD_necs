@@ -403,7 +403,7 @@ def get_dataset(dataroot, npoints,category,use_mask=False):
 
 
 def evaluate_gen(opt, ref_pcs, logger):
-    print("From evaluation")
+
     if ref_pcs is None:
         _, test_dataset = get_dataset(opt.dataroot, opt.npoints, opt.category, use_mask=False)
         test_dataloader = torch.utils.data.DataLoader(test_dataset, batch_size=opt.batch_size,
@@ -533,7 +533,7 @@ def main(opt):
 def parse_args():
 
     parser = argparse.ArgumentParser()
-    parser.add_argument('--dataroot', default='ShapeNetCore.v4.PC15k/')
+    parser.add_argument('--dataroot', default='ShapeNetCore.v2.PC15k/')
     parser.add_argument('--category', default='chair')
 
     parser.add_argument('--batch_size', type=int, default=50, help='input batch size')
@@ -560,7 +560,7 @@ def parse_args():
     parser.add_argument('--model_var_type', default='fixedsmall')
 
 
-    parser.add_argument('--model', default='',required=True, help="path to model (to continue training)")
+    parser.add_argument('--model', default='',required=False, help="path to model (to continue training)")
 
     '''eval'''
 
@@ -579,12 +579,14 @@ def parse_args():
         opt.cuda = False
 
     return opt
+
 if __name__ == '__main__':
     opt = parse_args()
     opt.category = 'airplane'
-    opt.npoints = 2048
+    opt.batch_size = 50 #5
     opt.generate = True
     opt.eval_gen = True
+    opt.model = '/home/ncaytuir/data-local/PVD_necs/output/train_generation/ckpt_original_airplane_2899.pth'
     set_seed(opt)
 
     main(opt)
