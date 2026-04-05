@@ -400,8 +400,6 @@ def get_dataset(dataroot, npoints,category,use_mask=False):
     )
     return tr_dataset, te_dataset
 
-
-
 def evaluate_gen(opt, ref_pcs, logger):
 
     if ref_pcs is None:
@@ -409,7 +407,9 @@ def evaluate_gen(opt, ref_pcs, logger):
         test_dataloader = torch.utils.data.DataLoader(test_dataset, batch_size=opt.batch_size,
                                                       shuffle=False, num_workers=int(opt.workers), drop_last=False)
         ref = []
+
         for data in tqdm(test_dataloader, total=len(test_dataloader), desc='Generating Samples'):
+        #for i, data in tqdm(cycle(test_dataloader), total=num_samples, desc='Generating Samples'):
             x = data['test_points']
             m, s = data['mean'].float(), data['std'].float()
 
@@ -437,40 +437,43 @@ def evaluate_gen(opt, ref_pcs, logger):
     pprint('JSD: {}'.format(jsd))
     logger.info('JSD: {}'.format(jsd))
 
-
+from itertools import cycle
 
 def generate(model, opt):
 
     _, test_dataset = get_dataset(opt.dataroot, opt.npoints, opt.category)
 
-    test_dataloader = torch.utils.data.DataLoader(test_dataset, batch_size=opt.batch_size,
+    sampler = torch.utils.data.RandomSampler(test_dataset, replacement=True, num_samples=1000)
+
+    test_dataloader = torch.utils.data.DataLoader(test_dataset, batch_size=opt.batch_size, sampler=sampler,
                                                   shuffle=False, num_workers=int(opt.workers), drop_last=False)
 
     with torch.no_grad():
 
         samples = []
         ref = []
+        cont = 1
 
         for i, data in tqdm(enumerate(test_dataloader), total=len(test_dataloader), desc='Generating Samples'):
-
             x = data['test_points'].transpose(1,2)
             m, s = data['mean'].float(), data['std'].float()
 
-            gen = model.gen_samples(x.shape,
-                                       'cuda', clip_denoised=False).detach().cpu()
+            print("x.shape", x.shape)
+
+            gen = model.gen_samples(x.shape, 'cuda', clip_denoised=False).detach().cpu()
 
             gen = gen.transpose(1,2).contiguous()
             x = x.transpose(1,2).contiguous()
-
-
 
             gen = gen * s + m
             x = x * s + m
             samples.append(gen)
             ref.append(x)
 
-            visualize_pointcloud_batch(os.path.join(str(Path(opt.eval_path).parent), 'x.png'), gen[:64], None,
+            visualize_pointcloud_batch(os.path.join(str(Path(opt.eval_path).parent), f'x_{cont}.png'), gen[:64], None,
                                        None, None)
+            
+            cont += 1
 
         samples = torch.cat(samples, dim=0)
         ref = torch.cat(ref, dim=0)
@@ -518,6 +521,7 @@ def main(opt):
         resumed_param = torch.load(opt.model)
         model.load_state_dict(resumed_param['model_state'])
 
+        print("model", model)
 
         ref = None
         if opt.generate:
@@ -528,6 +532,7 @@ def main(opt):
         if opt.eval_gen:
             # Evaluate generation
             evaluate_gen(opt, ref, logger)
+            #pass
 
 
 def parse_args():
@@ -541,7 +546,7 @@ def parse_args():
     parser.add_argument('--niter', type=int, default=10000, help='number of epochs to train for')
 
     parser.add_argument('--generate',default=True)
-    parser.add_argument('--eval_gen', default=True)
+    parser.add_argument('--eval_gen', default=False)#True
 
     parser.add_argument('--nc', default=3)
     parser.add_argument('--npoints', default=2048)
@@ -582,11 +587,65 @@ def parse_args():
 
 if __name__ == '__main__':
     opt = parse_args()
-    opt.category = 'airplane'
-    opt.batch_size = 50 #5
+    #opt.category = 'chair'
+    #opt.batch_size = 50 #5
     opt.generate = True
-    opt.eval_gen = True
-    opt.model = '/home/ncaytuir/data-local/PVD_necs/output/train_generation/ckpt_original_airplane_2899.pth'
+    opt.eval_gen = False
+    #opt.model = '/home/ncaytuir/data-local/PVD_necs/checkpoints/ckpt_original_chair_1799.pth'
     set_seed(opt)
 
     main(opt)
+
+""" Sobre airplane
+########################################################### Época 2899 (original)
+Sobre BS: 50
+{'1-NN-CD-acc': 0.7358024716377258,
+ '1-NN-CD-acc_f': 0.6617283821105957,
+ '1-NN-CD-acc_t': 0.809876561164856,
+ '1-NN-EMD-acc': 0.6012345552444458,
+ '1-NN-EMD-acc_f': 0.5283950567245483,
+ '1-NN-EMD-acc_t': 0.6740740537643433,
+ 'lgan_cov-CD': 0.4839506149291992,
+ 'lgan_cov-EMD': 0.5333333611488342,
+ 'lgan_mmd-CD': 0.00022542446095030755,
+ 'lgan_mmd-EMD': 0.0035789310932159424,
+ 'lgan_mmd_smp-CD': 0.0007010097033344209,
+ 'lgan_mmd_smp-EMD': 0.007091946434229612}
+2025-08-20 13:20:17,997 : JSD: 0.04351473113079862
+"""
+
+""" Sobre car
+########################################################### Época 3999 (original)
+Sobre BS: 50
+{'1-NN-CD-acc': 0.5838068127632141,
+ '1-NN-CD-acc_f': 0.6676136255264282,
+ '1-NN-CD-acc_t': 0.5,
+ '1-NN-EMD-acc': 0.5454545617103577,
+ '1-NN-EMD-acc_f': 0.5738636255264282,
+ '1-NN-EMD-acc_t': 0.5170454382896423,
+ 'lgan_cov-CD': 0.4630681872367859,
+ 'lgan_cov-EMD': 0.49715909361839294,
+ 'lgan_mmd-CD': 0.0010250993072986603,
+ 'lgan_mmd-EMD': 0.007565687410533428,
+ 'lgan_mmd_smp-CD': 0.0008618682622909546,
+ 'lgan_mmd_smp-EMD': 0.00733407586812973}
+2025-08-27 15:28:00,787 : JSD: 0.009442442750211555
+"""
+
+""" Sobre chair
+########################################################### Época 1799 (original)
+Sobre BS: 50
+{'1-NN-CD-acc': 0.5770393013954163,
+ '1-NN-CD-acc_f': 0.69486403465271,
+ '1-NN-CD-acc_t': 0.4592145085334778,
+ '1-NN-EMD-acc': 0.5453172326087952,
+ '1-NN-EMD-acc_f': 0.6057401895523071,
+ '1-NN-EMD-acc_t': 0.4848942458629608,
+ 'lgan_cov-CD': 0.47129908204078674,
+ 'lgan_cov-EMD': 0.5075528621673584,
+ 'lgan_mmd-CD': 0.0026015674229711294,
+ 'lgan_mmd-EMD': 0.015494581311941147,
+ 'lgan_mmd_smp-CD': 0.002403168473392725,
+ 'lgan_mmd_smp-EMD': 0.015306074172258377}
+2025-08-27 17:04:47,036 : JSD: 0.01629148209160114
+"""

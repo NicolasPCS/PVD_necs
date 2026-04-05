@@ -657,7 +657,6 @@ def train(gpu, opt, output_dir, noises_init):
 
             optimizer.step()
 
-
             if i % opt.print_freq == 0 and should_diag:
 
                 logger.info('[{:>3d}/{:>3d}][{:>3d}/{:>3d}]    loss: {:>10.4f},    '
@@ -786,7 +785,7 @@ def main():
 def parse_args():
 
     parser = argparse.ArgumentParser()
-    parser.add_argument('--dataroot', default='ShapeNetCore.v5.PC15k/')
+    parser.add_argument('--dataroot', default='/home/ncaytuir/data/Datasets/Mirrored_ShapeNetCore.v3.PC15k')
     parser.add_argument('--category', default='chair')
 
     parser.add_argument('--bs', type=int, default=16, help='input batch size')

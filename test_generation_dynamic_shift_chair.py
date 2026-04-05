@@ -438,24 +438,9 @@ def evaluate_gen(opt, ref_pcs, logger):
     logger.info("Loading sample path: %s"
       % (opt.eval_path))
     sample_pcs = torch.load(opt.eval_path).contiguous()
-    #sample_pcs = sample_pcs['ref']
-    """ sample_data = torch.load(opt.eval_path)
-
-    if isinstance(sample_data, dict):
-        sample_pcs = sample_data['ref']
-        mean = sample_data['mean']
-        std = sample_data['std']
-        sample_pcs = sample_pcs * std + mean  # Desnormalización
-    else:
-        sample_pcs = sample_data  # Ya es un tensor desnormalizado """
-
+    
     logger.info("Generation sample size:%s reference size: %s"
           % (sample_pcs.size(), ref_pcs.size()))
-
-    #sample_pcs = normalization_bb(sample_pcs.float())
-    #ref_pcs = normalization_bb(ref_pcs.float())
-
-    #logger.info("Normalizados")
 
     # Compute metrics
     results = compute_all_metrics(sample_pcs, ref_pcs, opt.batch_size)
@@ -469,6 +454,35 @@ def evaluate_gen(opt, ref_pcs, logger):
     pprint('JSD: {}'.format(jsd))
     logger.info('JSD: {}'.format(jsd))
 
+# -------- Helpers
+def dynamic_shift(pc, k):
+    """
+    pc: [1, N, 3]
+    Returns the best shift value
+    """
+    x = pc[0, :, 0] # [N]}
+    # Fewest k = topk over -x
+    k = min(k, x.shape[0])
+    #print(f"Dynamic shift: k={k}")
+    vals, _ = torch.topk(x, k=k, largest=False)
+    #print(f"Dynamic shift: vals={vals}")
+    mean_k_smallest = vals.mean()
+    #print(f"Dynamic shift: mean_k_smallest={mean_k_smallest}")
+    #print(f"Dynamic shift: {mean_k_smallest / 100}")
+    return mean_k_smallest / 100
+
+def stitch_on_x0(pc, alphas=(0.45, 0.5, 0.55)):
+    """
+    half_pc: [1, N, 3]
+    Return the stitched points: mean of (p, mirror(p)) with x=0
+    """
+    # Computes the average between the two points, it is expected to
+    # obtain values closer to 0'
+    mir = pc.clone()
+    mir[:, :, 0] *= -1
+    seam = [ (1-a)*pc + a*mir for a in alphas]
+    return torch.cat(seam, dim=1) # [1, len(alphas)*N, 3]
+
 def generate(model, opt):
 
     _, test_dataset = get_dataset(opt.dataroot_gen, opt.npoints, opt.category)
@@ -478,6 +492,7 @@ def generate(model, opt):
 
     with torch.no_grad():
 
+        halfs = []
         samples = []
         ref = []
 
@@ -486,66 +501,75 @@ def generate(model, opt):
             x = data['test_points'].transpose(1,2)
             m, s = data['mean'].float(), data['std'].float()
 
-            gen = model.gen_samples(x.shape,
-                                       'cuda', clip_denoised=False).detach().cpu()
-
-            gen = gen.transpose(1,2).contiguous()
-            x = x.transpose(1,2).contiguous()
+            gen = model.gen_samples(x.shape, 'cuda', clip_denoised=False).detach().cpu()
+            gen = gen.transpose(1,2).contiguous() # [B, N, 3]
+            x = x.transpose(1,2).contiguous() # [B, N, 3]
 
             # Mean and std for complete objects
-            complete_objects_mean = torch.tensor([0.0004, 0.0061, 0.0488], device=gen.device).view(1, 1, 3) # [1, 1, 3]
-            complete_objects_std = torch.tensor([0.1201], device=gen.device).view(1, 1, 1) # [1, 1, 1]
+            complete_objects_mean = torch.tensor([-0.0003,  0.0040,  0.0040], device=gen.device).view(1, 1, 3) # [1, 1, 3]
+            complete_objects_std = torch.tensor([0.1685], device=gen.device).view(1, 1, 1) # [1, 1, 1]
 
-            if gen.shape[1] < 2048:
-                print(f"[DEBUG] Number of points of generated points is less than 2048 points: {gen.shape[1]}")
+            for b in range(gen.shape[0]):
+                gen_b = gen[b].unsqueeze(0) # [1, N, 3]
+                x_b = x[b].unsqueeze(0) # [1, N, 3]
 
-            # Move cloud to x > 0
-            ## Generated
-            shift = abs(torch.min(gen[:, :, 0])) - 0.01 # After visualize generated half point clouds, this is the best value
-            gen[:, :, 0] += shift
-            
-            # TODO: compute the best shift value for the reference point cloud
+                #if gen_b.shape[1] < 2048:
+                    #print(f"[DEBUG] Number of points of generated points is less than 2048 points: {gen_b.shape[1]}")
 
-            ## Reference
-            shift = abs(torch.min(x[:, :, 0]))
-            x[:, :, 0] += shift
+                # Move cloud to x > 0, and mirror it
+                ## Generated
+                d_shift = dynamic_shift(gen_b, k=64)
+                shift = abs(torch.min(gen_b[:, :, 0])) - 0.02
+                #print(shift)
+                gen_b[:, :, 0] += shift
+                #gen_b[:, :, 0] -= shift
 
-            # Mirror the cloud
-            gen_mirrored = gen.clone()
-            gen_mirrored[:, :, 0] *= -1
+                # Mirror
+                gen_mirrored = gen_b.clone()
+                gen_mirrored[:, :, 0] *= -1
 
-            x_mirrored = x.clone()
-            x_mirrored[:, :, 0] *= -1
+                halfs.append(gen_b)
 
-            # Concatenate original and mirrored clouds
-            gen_full_pc = torch.cat((gen, gen_mirrored), dim=1)
-            x_full_pc = torch.cat((x, x_mirrored), dim=1)
+                # Seam
+                #gen_seam = stitch_on_x0(gen_b, alphas=(0.45, 0.5, 0.55))
 
-            print(f"Size of cloud after mirroring: {gen_full_pc.shape}, {x_full_pc.shape}")
+                ## Reference
+                shift = abs(torch.min(x_b[:, :, 0]))
+                x_b[:, :, 0] += shift
+                x_mirrored = x_b.clone()
+                x_mirrored[:, :, 0] *= -1
 
-            # Sample the point cloud to 2048 points
-            gen_np = gen_full_pc.squeeze(0).numpy() # (1, 4096, 3) → (4096, 3)
-            gen_sampled = farthest_point_sampling(gen_np, opt.npoints)
-            gen = torch.tensor(gen_sampled, dtype=torch.float32, device=gen.device).unsqueeze(0)
+                # Concatenate original and mirrored clouds
+                gen_full_pc = torch.cat((gen_b, gen_mirrored), dim=1)#, gen_seam), dim=1)
+                x_full_pc = torch.cat((x_b, x_mirrored), dim=1)
 
-            x_np = x_full_pc.squeeze(0).numpy()
-            x_sampled = farthest_point_sampling(x_np, opt.npoints)
-            x = torch.tensor(x_sampled, dtype=torch.float32, device=x.device).unsqueeze(0)
+                #print(f"Size of cloud after mirroring: {gen_full_pc.shape}, {x_full_pc.shape}")
 
-            print(f"Size of cloud after sampling: {gen.shape}, {x.shape}")
+                # Sample the point cloud to 2048 points
+                gen_np = gen_full_pc.squeeze(0).numpy() # (1, 4096, 3) → (4096, 3)
+                gen_sampled = farthest_point_sampling(gen_np, opt.npoints)
+                gen_b = torch.tensor(gen_sampled, dtype=torch.float32, device=gen.device).unsqueeze(0)
 
-            # Desnormalization
-            gen = gen * complete_objects_std + complete_objects_mean
-            x = x * complete_objects_std + complete_objects_mean
-            samples.append(gen)
-            ref.append(x)
+                x_np = x_full_pc.squeeze(0).numpy()
+                x_sampled = farthest_point_sampling(x_np, opt.npoints)
+                x_b = torch.tensor(x_sampled, dtype=torch.float32, device=x.device).unsqueeze(0)
 
-            visualize_pointcloud_batch(os.path.join(str(Path(opt.eval_path).parent), 'x.png'), gen[:64], None,
-                                       None, None)
+                #print(f"Size of cloud after sampling: {gen.shape}, {x.shape}")
 
+                # Desnormalization
+                gen_b = gen_b * complete_objects_std + complete_objects_mean
+                x_b = x_b * complete_objects_std + complete_objects_mean
+                samples.append(gen_b)
+                ref.append(x_b)
+
+                visualize_pointcloud_batch(os.path.join(str(Path(opt.eval_path).parent), f'x_{i}.png'),
+                                           gen_b[:64], None, None, None)
+
+        halfs = torch.cat(halfs, dim=0)
         samples = torch.cat(samples, dim=0)
         ref = torch.cat(ref, dim=0)
 
+        torch.save(halfs, opt.half_path)
         torch.save(samples, opt.eval_path)
         torch.save(ref, opt.ref_path)
 
@@ -593,6 +617,7 @@ def main(opt):
             opt.eval_path = os.path.join(outf_syn, 'samples.pth')
             # Added by Nicolás
             opt.ref_path = os.path.join(outf_syn, 'reference.pth')
+            opt.half_path = os.path.join(outf_syn, 'halfs.pth')
             Path(opt.eval_path).parent.mkdir(parents=True, exist_ok=True)
             ref=generate(model, opt)
             
@@ -606,7 +631,7 @@ def main(opt):
 def parse_args():
 
     parser = argparse.ArgumentParser()
-    parser.add_argument('--dataroot_gen', default='/home/ncaytuir/data-local/PVD_necs/ShapeNetCore.v4.PC15k')
+    parser.add_argument('--dataroot_gen', default='/home/ncaytuir/data-local/PVD_necs/ShapeNetCore.v5.PC15k')
     parser.add_argument('--dataroot_eval', default='/home/ncaytuir/data-local/PVD_necs/ShapeNetCore.v2.PC15k')
     parser.add_argument('--category', default='airplane')
 
@@ -653,11 +678,11 @@ def parse_args():
     return opt
 if __name__ == '__main__':
     opt = parse_args()
-    opt.category = 'airplane'
-    opt.batch_size = 1
+    opt.category = 'chair'
+    opt.batch_size = 50 #5
     opt.generate = True
     opt.eval_gen = True
-    opt.model = '/home/ncaytuir/data-local/PVD_necs/output/train_generation/2025-06-18-12-50-25/epoch_4999.pth'
+    opt.model = '/home/ncaytuir/data-local/PVD_necs/checkpoints/relela-08_chair/epoch_1799.pth'
     #opt.eval_path = '/home/ncaytuir/data-local/PVD_necs/output/test_generation_new2/2025-06-21-18-08-14/syn/samples.pth'
     #opt.reference_path = '/home/ncaytuir/data-local/PVD_necs/output/test_generation_new2/2025-06-21-18-08-14/syn/reference.pth'
     set_seed(opt)
@@ -665,3 +690,38 @@ if __name__ == '__main__':
     main(opt)
 
 # python test_generation_new.py --model /home/ncaytuir/data-local/PVD_necs/output/train_generation/ckpt_original_airplane_2899.pth --eval_path /home/ncaytuir/data-local/PVD_necs/output/train_generation/ivan_samples_airplane.pt
+
+""" Sobre chair
+########################################################### Época 1199 (nuevo)
+Sobre BS: 50
+{'1-NN-CD-acc': 0.5800628066062927,
+ '1-NN-CD-acc_f': 0.6891679763793945,
+ '1-NN-CD-acc_t': 0.47095760703086853,
+ '1-NN-EMD-acc': 0.5737833380699158,
+ '1-NN-EMD-acc_f': 0.610675036907196,
+ '1-NN-EMD-acc_t': 0.5368916988372803,
+ 'lgan_cov-CD': 0.4536891579627991,
+ 'lgan_cov-EMD': 0.4960753619670868,
+ 'lgan_mmd-CD': 0.0021512042731046677,
+ 'lgan_mmd-EMD': 0.012845391407608986,
+ 'lgan_mmd_smp-CD': 0.0018713470781221986,
+ 'lgan_mmd_smp-EMD': 0.01243920810520649}
+'JSD: 0.018872303126226342'
+2025-08-27 14:43:44,953 : JSD: 0.018872303126226342
+
+########################################################### Época 1799 (nuevo)
+{'1-NN-CD-acc': 0.5926216840744019,
+ '1-NN-CD-acc_f': 0.7080062627792358,
+ '1-NN-CD-acc_t': 0.4772370457649231,
+ '1-NN-EMD-acc': 0.5777080059051514,
+ '1-NN-EMD-acc_f': 0.6138147711753845,
+ '1-NN-EMD-acc_t': 0.5416012406349182,
+ 'lgan_cov-CD': 0.46467816829681396,
+ 'lgan_cov-EMD': 0.5180533528327942,
+ 'lgan_mmd-CD': 0.00210381462238729,
+ 'lgan_mmd-EMD': 0.012817691080272198,
+ 'lgan_mmd_smp-CD': 0.0019115853356197476,
+ 'lgan_mmd_smp-EMD': 0.01255833264440298}
+'JSD: 0.013486841872921929'
+2025-08-28 13:56:18,550 : JSD: 0.013486841872921929
+""" 

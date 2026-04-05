@@ -454,6 +454,35 @@ def evaluate_gen(opt, ref_pcs, logger):
     pprint('JSD: {}'.format(jsd))
     logger.info('JSD: {}'.format(jsd))
 
+# -------- Helpers
+def dynamic_shift(pc, k):
+    """
+    pc: [1, N, 3]
+    Returns the best shift value
+    """
+    x = pc[0, :, 0] # [N]}
+    # Fewest k = topk over -x
+    k = min(k, x.shape[0])
+    #print(f"Dynamic shift: k={k}")
+    vals, _ = torch.topk(x, k=k, largest=False)
+    #print(f"Dynamic shift: vals={vals}")
+    mean_k_smallest = vals.mean()
+    #print(f"Dynamic shift: mean_k_smallest={mean_k_smallest}")
+    #print(f"Dynamic shift: {mean_k_smallest / 100}")
+    return mean_k_smallest / 100
+
+def stitch_on_x0(pc, alphas=(0.45, 0.5, 0.55)):
+    """
+    half_pc: [1, N, 3]
+    Return the stitched points: mean of (p, mirror(p)) with x=0
+    """
+    # Computes the average between the two points, it is expected to
+    # obtain values closer to 0'
+    mir = pc.clone()
+    mir[:, :, 0] *= -1
+    seam = [ (1-a)*pc + a*mir for a in alphas]
+    return torch.cat(seam, dim=1) # [1, len(alphas)*N, 3]
+
 def generate(model, opt):
 
     _, test_dataset = get_dataset(opt.dataroot_gen, opt.npoints, opt.category)
@@ -463,6 +492,7 @@ def generate(model, opt):
 
     with torch.no_grad():
 
+        halfs = []
         samples = []
         ref = []
 
@@ -476,8 +506,8 @@ def generate(model, opt):
             x = x.transpose(1,2).contiguous() # [B, N, 3]
 
             # Mean and std for complete objects
-            complete_objects_mean = torch.tensor([0.0004, 0.0061, 0.0488], device=gen.device).view(1, 1, 3) # [1, 1, 3]
-            complete_objects_std = torch.tensor([0.1201], device=gen.device).view(1, 1, 1) # [1, 1, 1]
+            complete_objects_mean = torch.tensor([0.0013, 0.0073, 0.0235], device=gen.device).view(1, 1, 3) # [1, 1, 3]
+            complete_objects_std = torch.tensor([0.1635], device=gen.device).view(1, 1, 1) # [1, 1, 1]
 
             for b in range(gen.shape[0]):
                 gen_b = gen[b].unsqueeze(0) # [1, N, 3]
@@ -488,31 +518,20 @@ def generate(model, opt):
 
                 # Move cloud to x > 0, and mirror it
                 ## Generated
-                gen_b[:, :, 0] += abs(torch.min(gen_b[:, :, 0]))
+                d_shift = dynamic_shift(gen_b, k=32)
+                shift = abs(torch.min(gen_b[:, :, 0])) - d_shift
+                #print(shift)
+                gen_b[:, :, 0] += shift
+                #gen_b[:, :, 0] -= shift
 
                 # Mirror
                 gen_mirrored = gen_b.clone()
                 gen_mirrored[:, :, 0] *= -1
 
-                # Convert to Open3D format
-                source_pc = o3d.geometry.PointCloud()
-                source_pc.points = o3d.utility.Vector3dVector(gen_b.squeeze(0).numpy())
-                
-                target_pc = o3d.geometry.PointCloud()
-                target_pc.points = o3d.utility.Vector3dVector(gen_mirrored.squeeze(0).numpy())
+                halfs.append(gen_b)
 
-                # Step 4: Run ICP
-                # Use a small threshold for convergence, e.g., 0.01
-                threshold = 0.01 
-                trans_init = np.identity(4)
-                reg_p2p = o3d.pipelines.registration.registration_icp(
-                    source_pc, target_pc, threshold, trans_init,
-                    o3d.pipelines.registration.TransformationEstimationPointToPoint())
-
-                # Step 5: Apply the transformation and combine
-                aligned_pc = source_pc.transform(reg_p2p.transformation)
-                gen_full_pc = np.concatenate((np.asarray(aligned_pc.points), np.asarray(target_pc.points)), axis=0)
-                gen_full_pc = torch.tensor(gen_full_pc, dtype=torch.float32, device=gen.device).unsqueeze(0)
+                # Seam
+                #gen_seam = stitch_on_x0(gen_b, alphas=(0.45, 0.5, 0.55))
 
                 ## Reference
                 shift = abs(torch.min(x_b[:, :, 0]))
@@ -521,7 +540,7 @@ def generate(model, opt):
                 x_mirrored[:, :, 0] *= -1
 
                 # Concatenate original and mirrored clouds
-                #gen_full_pc = torch.cat((gen_b, gen_mirrored, gen_seam), dim=1)
+                gen_full_pc = torch.cat((gen_b, gen_mirrored), dim=1)#, gen_seam), dim=1)
                 x_full_pc = torch.cat((x_b, x_mirrored), dim=1)
 
                 #print(f"Size of cloud after mirroring: {gen_full_pc.shape}, {x_full_pc.shape}")
@@ -546,9 +565,11 @@ def generate(model, opt):
                 visualize_pointcloud_batch(os.path.join(str(Path(opt.eval_path).parent), f'x_{i}.png'),
                                            gen_b[:64], None, None, None)
 
+        halfs = torch.cat(halfs, dim=0)
         samples = torch.cat(samples, dim=0)
         ref = torch.cat(ref, dim=0)
 
+        torch.save(halfs, opt.half_path)
         torch.save(samples, opt.eval_path)
         torch.save(ref, opt.ref_path)
 
@@ -596,6 +617,7 @@ def main(opt):
             opt.eval_path = os.path.join(outf_syn, 'samples.pth')
             # Added by Nicolás
             opt.ref_path = os.path.join(outf_syn, 'reference.pth')
+            opt.half_path = os.path.join(outf_syn, 'halfs.pth')
             Path(opt.eval_path).parent.mkdir(parents=True, exist_ok=True)
             ref=generate(model, opt)
             
@@ -609,7 +631,7 @@ def main(opt):
 def parse_args():
 
     parser = argparse.ArgumentParser()
-    parser.add_argument('--dataroot_gen', default='/home/ncaytuir/data-local/PVD_necs/ShapeNetCore.v4.PC15k')
+    parser.add_argument('--dataroot_gen', default='/home/ncaytuir/data-local/PVD_necs/ShapeNetCore.v5.PC15k')
     parser.add_argument('--dataroot_eval', default='/home/ncaytuir/data-local/PVD_necs/ShapeNetCore.v2.PC15k')
     parser.add_argument('--category', default='airplane')
 
@@ -656,11 +678,11 @@ def parse_args():
     return opt
 if __name__ == '__main__':
     opt = parse_args()
-    opt.category = 'airplane'
-    opt.batch_size = 1 #5
+    opt.category = 'car'
+    opt.batch_size = 50 #5
     opt.generate = True
     opt.eval_gen = True
-    opt.model = '/home/ncaytuir/data-local/PVD_necs/output/train_generation/2025-06-18-12-50-25/epoch_7599.pth'
+    opt.model = '/home/ncaytuir/data-local/PVD_necs/checkpoints/patagon_car/epoch_3299.pth'
     #opt.eval_path = '/home/ncaytuir/data-local/PVD_necs/output/test_generation_new2/2025-06-21-18-08-14/syn/samples.pth'
     #opt.reference_path = '/home/ncaytuir/data-local/PVD_necs/output/test_generation_new2/2025-06-21-18-08-14/syn/reference.pth'
     set_seed(opt)
@@ -669,23 +691,21 @@ if __name__ == '__main__':
 
 # python test_generation_new.py --model /home/ncaytuir/data-local/PVD_necs/output/train_generation/ckpt_original_airplane_2899.pth --eval_path /home/ncaytuir/data-local/PVD_necs/output/train_generation/ivan_samples_airplane.pt
 
-""" Sobre Airplane
-########################################################### Época 7599
-Sobre BS: 5
-{'1-NN-CD-acc': 0.8148148059844971,
- '1-NN-CD-acc_f': 0.7456790208816528,
- '1-NN-CD-acc_t': 0.8839505910873413,
- '1-NN-EMD-acc': 0.750617265701294,
- '1-NN-EMD-acc_f': 0.6419752836227417,
- '1-NN-EMD-acc_t': 0.8592592477798462,
- 'lgan_cov-CD': 0.3802469074726105,
- 'lgan_cov-EMD': 0.42716050148010254,
- 'lgan_mmd-CD': 0.0001593269844306633,
- 'lgan_mmd-EMD': 0.002619354519993067,
- 'lgan_mmd_smp-CD': 0.003547427011653781,
- 'lgan_mmd_smp-EMD': 0.01565161533653736}
-'JSD: 0.1262633596132705'
-2025-08-15 21:40:48,536 : JSD: 0.1262633596132705
-
-Sobre BS: 1
+""" Sobre Car
+########################################################### Época 3299 (nuevo)
+Sobre BS: 50
+{'1-NN-CD-acc': 0.6069363951683044,
+ '1-NN-CD-acc_f': 0.7023121118545532,
+ '1-NN-CD-acc_t': 0.5115606784820557,
+ '1-NN-EMD-acc': 0.5635837912559509,
+ '1-NN-EMD-acc_f': 0.6271676421165466,
+ '1-NN-EMD-acc_t': 0.5,
+ 'lgan_cov-CD': 0.45375722646713257,
+ 'lgan_cov-EMD': 0.5144508481025696,
+ 'lgan_mmd-CD': 0.0006804473814554513,
+ 'lgan_mmd-EMD': 0.004747327882796526,
+ 'lgan_mmd_smp-CD': 0.0006689984584227204,
+ 'lgan_mmd_smp-EMD': 0.005006482824683189}
+'JSD: 0.0063879214830002695'
+2025-08-27 13:08:18,189 : JSD: 0.0063879214830002695
 """
