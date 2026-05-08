@@ -11,6 +11,5 @@ eval_data
 ShapeNetCore.v4.PC15k/
 ShapeNetCore.v5.PC15k/
 ShapeNetCore.v6.PC15k/
-MyScripts/
 checkpoints/
 noises/
