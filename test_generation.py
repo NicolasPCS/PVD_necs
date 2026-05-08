@@ -470,8 +470,7 @@ def generate(model, opt):
             samples.append(gen)
             ref.append(x)
 
-            visualize_pointcloud_batch(os.path.join(str(Path(opt.eval_path).parent), f'x_{cont}.png'), gen[:64], None,
-                                       None, None)
+            #visualize_pointcloud_batch(os.path.join(str(Path(opt.eval_path).parent), f'x_{cont}.png'), gen[:64], None, None, None)
             
             cont += 1
 
@@ -479,8 +478,6 @@ def generate(model, opt):
         ref = torch.cat(ref, dim=0)
 
         torch.save(samples, opt.eval_path)
-
-
 
     return ref
 
@@ -531,17 +528,17 @@ def main(opt):
             
         if opt.eval_gen:
             # Evaluate generation
-            evaluate_gen(opt, ref, logger)
-            #pass
+            #evaluate_gen(opt, ref, logger)
+            pass
 
 
 def parse_args():
 
     parser = argparse.ArgumentParser()
-    parser.add_argument('--dataroot', default='ShapeNetCore.v2.PC15k/')
+    parser.add_argument('--dataroot', default='/home/ncaytuir/data/Datasets/ShapeNetCore.v6.PC15k')
     parser.add_argument('--category', default='chair')
 
-    parser.add_argument('--batch_size', type=int, default=50, help='input batch size')
+    parser.add_argument('--batch_size', type=int, default=100, help='input batch size')
     parser.add_argument('--workers', type=int, default=16, help='workers')
     parser.add_argument('--niter', type=int, default=10000, help='number of epochs to train for')
 

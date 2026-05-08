@@ -785,8 +785,8 @@ def main():
 def parse_args():
 
     parser = argparse.ArgumentParser()
-    parser.add_argument('--dataroot', default='/home/ncaytuir/data/Datasets/Mirrored_ShapeNetCore.v3.PC15k')
-    parser.add_argument('--category', default='chair')
+    parser.add_argument('--dataroot', default='/home/ncaytuir/data/Datasets/ShapeNetCore.v6.PC15k')
+    parser.add_argument('--category', default='car')
 
     parser.add_argument('--bs', type=int, default=16, help='input batch size')
     parser.add_argument('--workers', type=int, default=16, help='workers')

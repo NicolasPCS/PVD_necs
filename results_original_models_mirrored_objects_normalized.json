@@ -1,0 +1,47 @@
+[
+    {
+        "lgan_mmd-CD": 0.0011362731456756592,
+        "lgan_cov-CD": 0.5990098714828491,
+        "lgan_mmd_smp-CD": 0.004873833619058132,
+        "lgan_mmd-EMD": 0.02410784363746643,
+        "lgan_cov-EMD": 0.3564356565475464,
+        "lgan_mmd_smp-EMD": 0.05588097870349884,
+        "1-NN-CD-acc_t": 0.9356435537338257,
+        "1-NN-CD-acc_f": 0.7730000019073486,
+        "1-NN-CD-acc": 0.8198005557060242,
+        "1-NN-EMD-acc_t": 0.9381188154220581,
+        "1-NN-EMD-acc_f": 0.9330000281333923,
+        "1-NN-EMD-acc": 0.934472918510437,
+        "sample_pth": "/home/ncaytuir/data-local/PVD_necs/MyScripts/AblationResults/dpm_airplane.pth"
+    },
+    {
+        "lgan_mmd-CD": 0.003653149353340268,
+        "lgan_cov-CD": 0.4971098303794861,
+        "lgan_mmd_smp-CD": 0.0033081313595175743,
+        "lgan_mmd-EMD": 0.024715717881917953,
+        "lgan_cov-EMD": 0.6069363951683044,
+        "lgan_mmd_smp-EMD": 0.029193243011832237,
+        "1-NN-CD-acc_t": 0.8150289058685303,
+        "1-NN-CD-acc_f": 0.703000009059906,
+        "1-NN-CD-acc": 0.7317979335784912,
+        "1-NN-EMD-acc_t": 0.7138728499412537,
+        "1-NN-EMD-acc_f": 0.9399999976158142,
+        "1-NN-EMD-acc": 0.8818722367286682,
+        "sample_pth": "/home/ncaytuir/data-local/PVD_necs/MyScripts/AblationResults/dpm_car.pth"
+    },
+    {
+        "lgan_mmd-CD": 0.01288305502384901,
+        "lgan_cov-CD": 0.5259026885032654,
+        "lgan_mmd_smp-CD": 0.010798049159348011,
+        "lgan_mmd-EMD": 0.08656376600265503,
+        "lgan_cov-EMD": 0.5023548007011414,
+        "lgan_mmd_smp-EMD": 0.07802519202232361,
+        "1-NN-CD-acc_t": 0.4065934121608734,
+        "1-NN-CD-acc_f": 0.8989999890327454,
+        "1-NN-CD-acc": 0.7073915600776672,
+        "1-NN-EMD-acc_t": 0.5855572819709778,
+        "1-NN-EMD-acc_f": 0.8539999723434448,
+        "1-NN-EMD-acc": 0.7495418190956116,
+        "sample_pth": "/home/ncaytuir/data-local/PVD_necs/MyScripts/AblationResults/dpm_chair.pth"
+    }
+]

@@ -200,7 +200,7 @@ class Uniform15KPC(Dataset):
 
 
 class ShapeNet15kPointClouds(Uniform15KPC):
-    def __init__(self, root_dir="/home/ncaytuir/data/Datasets/Mirrored_ShapeNetCore.v3.PC15k",
+    def __init__(self, root_dir="/home/ncaytuir/data/Datasets/ShapeNetCore.v6.PC15k",
                  categories=['airplane'], tr_sample_size=10000, te_sample_size=2048,
                  split='train', scale=1., normalize_per_shape=False,
                  normalize_std_per_axis=False, box_per_shape=False,
